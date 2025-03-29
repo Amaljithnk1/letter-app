@@ -15,7 +15,12 @@ admin.initializeApp({
 });
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    process.env.FRONTEND_URL, 
+    "http://localhost:3000" // For local testing
+  ]
+}));
 app.use(express.json());
 
 // Store Google Tokens Endpoint (Essential)

@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: letter-app-backend
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: DATABASE_URL
+        value: your_postgres_url
+      - key: FIREBASE_PRIVATE_KEY
+        value: "-----BEGIN PRIVATE KEY-----\nyour_key_here\n-----END PRIVATE KEY-----"
