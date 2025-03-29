@@ -1,0 +1,61 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# ======================
+# Universal Ignores
+# ======================
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ======================
+# Environment Files
+# ======================
+.env
+.env.*
+!.env.example
+
+# ======================
+# Dependency Directories
+# ======================
+**/node_modules/
+**/.pnp
+.pnp.js
+
+# ======================
+# Build Outputs
+# ======================
+**/build/
+**/dist/
+**/coverage/
+
+# ======================
+# Editor/IDE
+# ======================
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ======================
+# Firebase/Google Secrets
+# ======================
+**/firebase-service-account.json
+**/google-services.json
+**/*credentials.json
+
+# ======================
+# Client-Specific (React)
+# ======================
+client/.env.local
+client/.env.development.local
+client/.env.test.local
+client/.env.production.local
+
+# ======================
+# Server-Specific (Node)
+# ======================
+server/.env
+server/.env.*
