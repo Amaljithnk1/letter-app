@@ -5,18 +5,37 @@ const { google } = require('googleapis');
 const admin = require('firebase-admin');
 const { sequelize, User, Letter } = require('./models');
 
-// Initialize Firebase Admin
-admin.initializeApp({
-  credential: admin.credential.cert({
-    projectId: process.env.FIREBASE_PROJECT_ID,
-    clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-    privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
-  })
-});
+// Initialize Firebase Admin with error handling
+try {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
+    }),
+    databaseURL: `https://${process.env.FIREBASE_PROJECT_ID}.firebaseio.com`
+  });
+  console.log('Firebase initialized successfully');
+} catch (error) {
+  console.error('Firebase initialization failed:', error);
+  process.exit(1);
+}
 
 const app = express();
 
-// Configure CORS with all your domains
+// Security headers configuration
+app.use((req, res, next) => {
+  // Required for Firebase auth popups to work
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  
+  // Security headers
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
+
+// Configure CORS
 const allowedOrigins = [
   'https://letter-app-mguk.onrender.com',
   'https://letter-app-phi.vercel.app',
@@ -25,15 +44,6 @@ const allowedOrigins = [
   'http://localhost:3000'
 ];
 
-// Critical security headers for Firebase auth
-app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups'); // Changed from unsafe-none
-  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless'); // Changed from unsafe-none
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
-  next();
-});
-
-// Enhanced CORS configuration
 app.use(cors({
   origin: function (origin, callback) {
     // Allow requests with no origin (like mobile apps or server-to-server)
@@ -41,21 +51,19 @@ app.use(cors({
       if (process.env.NODE_ENV === 'development') {
         return callback(null, true);
       }
-      // In production, you might want to be more restrictive
-      return callback(null, true);
+      return callback(new Error('Not allowed in production'), false);
     }
 
-    // Case-insensitive check for allowed origins
+    // Case-insensitive check
     const originAllowed = allowedOrigins.some(allowed => 
-      origin.toLowerCase() === allowed.toLowerCase() ||
-      origin.toLowerCase().includes(allowed.toLowerCase().replace('https://', '').replace('http://', ''))
+      origin.toLowerCase() === allowed.toLowerCase()
     );
 
     if (originAllowed) {
       return callback(null, true);
     }
 
-    console.error(`CORS blocked: ${origin} | Allowed: ${allowedOrigins.join(', ')}`);
+    console.warn(`CORS blocked request from: ${origin}`);
     return callback(new Error(`Not allowed by CORS. Allowed: ${allowedOrigins.join(', ')}`), false);
   },
   credentials: true,
@@ -67,26 +75,48 @@ app.use(cors({
 // Handle preflight requests
 app.options('*', cors());
 
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development',
+    allowedOrigins
+  });
+});
+
+// Debug endpoint
+app.get('/api/debug', (req, res) => {
+  res.json({
+    headers: req.headers,
+    ip: req.ip,
+    hostname: req.hostname,
+    origin: req.headers.origin
+  });
+});
 
 // Store tokens endpoint
 app.post('/api/auth/store-tokens', async (req, res) => {
   try {
-    const { accessToken } = req.body;
-    const firebaseToken = req.headers.authorization?.split(' ')[1];
+    const { accessToken, refreshToken } = req.body;
     
-    if (!firebaseToken) {
-      return res.status(401).json({ error: 'Authorization token missing' });
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Missing Authorization header' });
     }
 
+    const firebaseToken = req.headers.authorization.split(' ')[1];
     const decoded = await admin.auth().verifyIdToken(firebaseToken);
-    
+
     await User.upsert({
       uid: decoded.uid,
       email: decoded.email,
-      driveAccessToken: accessToken
+      driveAccessToken: accessToken,
+      driveRefreshToken: refreshToken,
+      lastLogin: new Date()
     });
-    
+
     res.json({ success: true });
   } catch (error) {
     console.error('Token storage error:', error);
@@ -97,52 +127,88 @@ app.post('/api/auth/store-tokens', async (req, res) => {
   }
 });
 
-// Save to Google Drive endpoint
+// Google Drive integration
 app.post('/api/letters', async (req, res) => {
   try {
-    const firebaseToken = req.headers.authorization?.split(' ')[1];
-    
-    if (!firebaseToken) {
-      return res.status(401).json({ error: 'Authorization token missing' });
+    if (!req.headers.authorization) {
+      return res.status(401).json({ error: 'Missing Authorization header' });
     }
 
+    const firebaseToken = req.headers.authorization.split(' ')[1];
     const decoded = await admin.auth().verifyIdToken(firebaseToken);
     const user = await User.findOne({ where: { uid: decoded.uid } });
-    
+
     if (!user?.driveAccessToken) {
       return res.status(403).json({ error: 'Google Drive not connected' });
     }
-    
-    const auth = new google.auth.OAuth2(
+
+    const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET
+      process.env.GOOGLE_CLIENT_SECRET,
+      process.env.GOOGLE_REDIRECT_URI
     );
-    auth.setCredentials({ access_token: user.driveAccessToken });
-    
-    const drive = google.drive({ version: 'v3', auth });
-    
+
+    oauth2Client.setCredentials({
+      access_token: user.driveAccessToken,
+      refresh_token: user.driveRefreshToken
+    });
+
+    // Token refresh handler
+    oauth2Client.on('tokens', async (tokens) => {
+      if (tokens.refresh_token) {
+        await User.update(
+          { driveRefreshToken: tokens.refresh_token },
+          { where: { uid: user.uid } }
+        );
+      }
+      if (tokens.access_token) {
+        await User.update(
+          { driveAccessToken: tokens.access_token },
+          { where: { uid: user.uid } }
+        );
+      }
+    });
+
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
     const file = await drive.files.create({
       requestBody: {
         name: `${req.body.title}.txt`,
-        mimeType: 'text/plain'
+        mimeType: 'text/plain',
+        parents: process.env.GOOGLE_DRIVE_FOLDER_ID ? 
+          [process.env.GOOGLE_DRIVE_FOLDER_ID] : undefined
       },
       media: {
         mimeType: 'text/plain',
         body: req.body.content
       },
-      fields: 'webViewLink'
+      fields: 'id,webViewLink,webContentLink'
     });
-    
+
     await Letter.create({
       title: req.body.title,
       content: req.body.content,
       driveId: file.data.id,
-      userId: user.uid
+      userId: user.uid,
+      driveUrl: file.data.webViewLink
     });
-    
-    res.json({ driveLink: file.data.webViewLink });
+
+    res.json({
+      success: true,
+      driveLink: file.data.webViewLink,
+      downloadLink: file.data.webContentLink
+    });
+
   } catch (error) {
     console.error('Drive API error:', error);
+    
+    if (error.code === 401) {
+      return res.status(401).json({ 
+        error: 'Google authentication expired',
+        action: 'reconnect-google' 
+      });
+    }
+    
     res.status(500).json({ 
       error: error.message,
       code: error.code 
@@ -153,20 +219,37 @@ app.post('/api/letters', async (req, res) => {
 // Error handling middleware
 app.use((err, req, res, next) => {
   console.error('Server error:', err);
+  
+  if (err.message.includes('CORS')) {
+    return res.status(403).json({ 
+      error: err.message,
+      allowedOrigins,
+      yourOrigin: req.headers.origin || 'none'
+    });
+  }
+
   res.status(500).json({ 
     error: 'Internal server error',
-    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+    details: process.env.NODE_ENV === 'development' ? err.stack : undefined
   });
 });
 
-// Start server
-sequelize.sync().then(() => {
-  const port = process.env.PORT || 10000; // Changed to match Render's port
-  app.listen(port, () => {
-    console.log(`
+// Database sync and server start
+sequelize.sync({ alter: process.env.NODE_ENV !== 'production' })
+  .then(() => {
+    const port = process.env.PORT || 10000;
+    app.listen(port, () => {
+      console.log(`
       Server running on port ${port}
-      Allowed Origins: ${allowedOrigins.join(', ')}
       Environment: ${process.env.NODE_ENV || 'development'}
-    `);
+      Allowed Origins: ${allowedOrigins.join(', ')}
+      Firebase Project: ${process.env.FIREBASE_PROJECT_ID}
+      `);
+    });
+  })
+  .catch(err => {
+    console.error('Database sync failed:', err);
+    process.exit(1);
   });
-});
+
+module.exports = app;
