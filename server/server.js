@@ -16,7 +16,7 @@ admin.initializeApp({
 
 const app = express();
 
-// Fix 1: Enhanced CORS configuration
+// Configure CORS
 const allowedOrigins = [
   'https://letter-app-mguk.onrender.com',
   'https://letter-app-phi.vercel.app',
@@ -25,22 +25,32 @@ const allowedOrigins = [
   'http://localhost:3000'
 ];
 
+// Security headers to fix COOP errors
+app.use((req, res, next) => {
+  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  next();
+});
+
+// CORS configuration
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or server-to-server)
-    if (!origin) return callback(null, true);
+    if (!origin && process.env.NODE_ENV === 'development') {
+      return callback(null, true);
+    }
     if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error('Not allowed by CORS'));
+    callback(new Error(`Not allowed by CORS. Allowed: ${allowedOrigins.join(', ')}`));
   },
-  credentials: true
+  credentials: true,
+  exposedHeaders: ['Authorization']
 }));
 
-// Fix 2: Add OPTIONS handler for preflight requests
+// Handle preflight requests
 app.options('*', cors());
 
 app.use(express.json());
 
-// Original endpoints below (unchanged)
+// Store tokens endpoint
 app.post('/api/auth/store-tokens', async (req, res) => {
   try {
     const { accessToken } = req.body;
@@ -59,6 +69,7 @@ app.post('/api/auth/store-tokens', async (req, res) => {
   }
 });
 
+// Save to Google Drive endpoint
 app.post('/api/letters', async (req, res) => {
   try {
     const firebaseToken = req.headers.authorization.split(' ')[1];
@@ -96,6 +107,15 @@ app.post('/api/letters', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Server error:', err);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    details: process.env.NODE_ENV === 'development' ? err.message : undefined
+  });
 });
 
 // Start server
