@@ -23,29 +23,40 @@ try {
 
 const app = express();
 
-// Configure CORS for all domains
-const allowedOrigins = [
-  'https://letter-app-mguk.onrender.com',
-  'https://letter-app-phi.vercel.app',
-  'https://letter-app-git-main-amaljithnk1s-projects.vercel.app',
-  'https://letter-6mu29sbsm-amaljithnk1s-projects.vercel.app',
-  'http://localhost:3000'
-];
+// Configure CORS using environment variables
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : ['http://localhost:3000'];
+
+// Add Vercel preview URLs pattern matching
+const isVercelPreview = (origin) => {
+  return origin && /\.vercel\.app$/.test(origin);
+};
 
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin && process.env.NODE_ENV === 'development') {
+    // Allow requests with no origin (like mobile apps or server-to-server)
+    if (!origin && process.env.NODE_ENV !== 'production') {
       return callback(null, true);
     }
+    
+    // Allow all Vercel preview deployments
+    if (isVercelPreview(origin)) {
+      return callback(null, true);
+    }
+    
+    // Check against allowed origins
     if (allowedOrigins.includes(origin)) {
       return callback(null, true);
     }
+    
     console.warn(`Blocked by CORS: ${origin}`);
+    console.log('Allowed origins:', allowedOrigins);
     return callback(new Error('Not allowed by CORS'), false);
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Security headers middleware
@@ -64,7 +75,8 @@ app.get('/api/health', (req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     environment: process.env.NODE_ENV || 'development',
-    allowedOrigins
+    allowedOrigins,
+    vercelPreviewEnabled: true
   });
 });
 
@@ -101,7 +113,6 @@ app.post('/api/auth/store-tokens', async (req, res) => {
 // Google Drive integration with automatic token refresh
 app.post('/api/letters', async (req, res) => {
   try {
-    // Validate request
     if (!req.headers.authorization) {
       return res.status(401).json({ error: 'Missing Authorization header' });
     }
@@ -114,7 +125,6 @@ app.post('/api/letters', async (req, res) => {
       return res.status(403).json({ error: 'Google Drive not connected' });
     }
 
-    // Configure Google OAuth client
     const oauth2Client = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
       process.env.GOOGLE_CLIENT_SECRET,
@@ -126,7 +136,6 @@ app.post('/api/letters', async (req, res) => {
       refresh_token: user.driveRefreshToken
     });
 
-    // Handle token refresh automatically
     oauth2Client.on('tokens', async (tokens) => {
       if (tokens.refresh_token) {
         await User.update(
@@ -147,7 +156,6 @@ app.post('/api/letters', async (req, res) => {
       auth: oauth2Client 
     });
 
-    // Create file in Drive
     const file = await drive.files.create({
       requestBody: {
         name: `${req.body.title}.txt`,
@@ -162,7 +170,6 @@ app.post('/api/letters', async (req, res) => {
       fields: 'id,webViewLink,webContentLink'
     });
 
-    // Save to database
     await Letter.create({
       title: req.body.title,
       content: req.body.content,
@@ -180,7 +187,6 @@ app.post('/api/letters', async (req, res) => {
   } catch (error) {
     console.error('Drive API error:', error);
     
-    // Handle specific Google API errors
     if (error.code === 401) {
       return res.status(401).json({ 
         error: 'Google authentication expired',
@@ -213,6 +219,7 @@ sequelize.sync({ alter: true })
       Server running on port ${port}
       Environment: ${process.env.NODE_ENV || 'development'}
       Allowed Origins: ${allowedOrigins.join(', ')}
+      Vercel Preview Enabled: true
       Firebase Project: ${process.env.FIREBASE_PROJECT_ID}
       `);
     });
