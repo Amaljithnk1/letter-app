@@ -16,7 +16,7 @@ admin.initializeApp({
 
 const app = express();
 
-// Configure CORS
+// Configure CORS with all your domains
 const allowedOrigins = [
   'https://letter-app-mguk.onrender.com',
   'https://letter-app-phi.vercel.app',
@@ -25,23 +25,42 @@ const allowedOrigins = [
   'http://localhost:3000'
 ];
 
-// Security headers to fix COOP errors
+// Critical security headers for Firebase auth
 app.use((req, res, next) => {
-  res.setHeader('Cross-Origin-Opener-Policy', 'unsafe-none');
-  res.setHeader('Cross-Origin-Embedder-Policy', 'unsafe-none');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups'); // Changed from unsafe-none
+  res.setHeader('Cross-Origin-Embedder-Policy', 'credentialless'); // Changed from unsafe-none
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
   next();
 });
 
-// CORS configuration
+// Enhanced CORS configuration
 app.use(cors({
   origin: function (origin, callback) {
-    if (!origin && process.env.NODE_ENV === 'development') {
+    // Allow requests with no origin (like mobile apps or server-to-server)
+    if (!origin) {
+      if (process.env.NODE_ENV === 'development') {
+        return callback(null, true);
+      }
+      // In production, you might want to be more restrictive
       return callback(null, true);
     }
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    callback(new Error(`Not allowed by CORS. Allowed: ${allowedOrigins.join(', ')}`));
+
+    // Case-insensitive check for allowed origins
+    const originAllowed = allowedOrigins.some(allowed => 
+      origin.toLowerCase() === allowed.toLowerCase() ||
+      origin.toLowerCase().includes(allowed.toLowerCase().replace('https://', '').replace('http://', ''))
+    );
+
+    if (originAllowed) {
+      return callback(null, true);
+    }
+
+    console.error(`CORS blocked: ${origin} | Allowed: ${allowedOrigins.join(', ')}`);
+    return callback(new Error(`Not allowed by CORS. Allowed: ${allowedOrigins.join(', ')}`), false);
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   exposedHeaders: ['Authorization']
 }));
 
@@ -54,7 +73,12 @@ app.use(express.json());
 app.post('/api/auth/store-tokens', async (req, res) => {
   try {
     const { accessToken } = req.body;
-    const firebaseToken = req.headers.authorization.split(' ')[1];
+    const firebaseToken = req.headers.authorization?.split(' ')[1];
+    
+    if (!firebaseToken) {
+      return res.status(401).json({ error: 'Authorization token missing' });
+    }
+
     const decoded = await admin.auth().verifyIdToken(firebaseToken);
     
     await User.upsert({
@@ -65,16 +89,29 @@ app.post('/api/auth/store-tokens', async (req, res) => {
     
     res.json({ success: true });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Token storage error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      code: error.code 
+    });
   }
 });
 
 // Save to Google Drive endpoint
 app.post('/api/letters', async (req, res) => {
   try {
-    const firebaseToken = req.headers.authorization.split(' ')[1];
+    const firebaseToken = req.headers.authorization?.split(' ')[1];
+    
+    if (!firebaseToken) {
+      return res.status(401).json({ error: 'Authorization token missing' });
+    }
+
     const decoded = await admin.auth().verifyIdToken(firebaseToken);
     const user = await User.findOne({ where: { uid: decoded.uid } });
+    
+    if (!user?.driveAccessToken) {
+      return res.status(403).json({ error: 'Google Drive not connected' });
+    }
     
     const auth = new google.auth.OAuth2(
       process.env.GOOGLE_CLIENT_ID,
@@ -105,7 +142,11 @@ app.post('/api/letters', async (req, res) => {
     
     res.json({ driveLink: file.data.webViewLink });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Drive API error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      code: error.code 
+    });
   }
 });
 
@@ -120,8 +161,12 @@ app.use((err, req, res, next) => {
 
 // Start server
 sequelize.sync().then(() => {
-  const port = process.env.PORT || 5000;
+  const port = process.env.PORT || 10000; // Changed to match Render's port
   app.listen(port, () => {
-    console.log(`Server running on port ${port}`);
+    console.log(`
+      Server running on port ${port}
+      Allowed Origins: ${allowedOrigins.join(', ')}
+      Environment: ${process.env.NODE_ENV || 'development'}
+    `);
   });
 });
